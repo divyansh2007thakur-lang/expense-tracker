@@ -1,6 +1,6 @@
 # Daybook expense tracker
 
-A responsive, browser-based expense tracker that can be hosted on GitHub Pages. Expenses are stored in the browser's local storage; they are not sent to a server.
+A responsive, browser-based expense tracker that can be hosted on GitHub Pages. Expenses and optional payment screenshots are stored in this browser; they are not sent to a server.
 
 ## Run
 
@@ -24,6 +24,7 @@ The workflow in `.github/workflows/pages.yml` publishes the static app automatic
 
 - The website is public, but each browser keeps its own expenses in local storage. Visitors cannot see one another's entries.
 - There are no user accounts, cloud backups, or syncing between devices. Expenses are specific to the browser and site origin.
+- Payment screenshots are saved in browser storage alongside the expenses. They may contain sensitive payment details, are not uploaded to the site, and can be lost when browser data is cleared.
 - Clearing browser data can permanently delete expenses. Keep the site URL the same when revisiting it.
 - The currency selector changes display formatting only; it does not convert exchange rates.
 - Google Fonts are loaded from Google Fonts.
@@ -31,6 +32,7 @@ The workflow in `.github/workflows/pages.yml` publishes the static app automatic
 ## Features
 
 - Add expenses with a description, amount, category, and date
+- Attach, view, replace, or remove a JPG, PNG, or WebP payment screenshot for each transaction (up to 5 MB per screenshot)
 - Review monthly totals, transaction counts, and spending by category
 - Browse past months and delete expenses
 - Choose a display currency (INR, USD, EUR, or GBP)

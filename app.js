@@ -11,13 +11,21 @@ const categoryColors = {
 const currencySymbols = { INR: "₹", USD: "$", EUR: "€", GBP: "£" };
 const currencyStorageKey = "daybook-currency";
 const expenseStorageKey = "daybook-expenses";
+const proofDatabaseName = "daybook-payment-proofs";
+const proofStoreName = "screenshots";
+const maxProofSize = 5 * 1024 * 1024;
+const allowedProofTypes = ["image/jpeg", "image/png", "image/webp"];
 
 const monthFilter = document.querySelector("#month-filter");
 const currencySelect = document.querySelector("#currency");
 const form = document.querySelector("#expense-form");
 const formMessage = document.querySelector("#form-message");
 const addButton = form.querySelector("button[type=submit]");
-let currentExpenses = [];
+const proofDialog = document.querySelector("#proof-dialog");
+const proofPreview = document.querySelector("#proof-preview");
+let proofDatabasePromise;
+let proofPreviewUrl;
+let dashboardLoadId = 0;
 
 function localDateString(date = new Date()) {
   const year = date.getFullYear();
@@ -80,9 +88,81 @@ function saveExpenses(expenses) {
   localStorage.setItem(expenseStorageKey, JSON.stringify(expenses));
 }
 
-function refreshDashboard() {
+function openProofDatabase() {
+  if (!("indexedDB" in window)) {
+    return Promise.reject(new Error("Screenshot storage is unavailable in this browser."));
+  }
+  if (!proofDatabasePromise) {
+    proofDatabasePromise = new Promise((resolve, reject) => {
+      const request = indexedDB.open(proofDatabaseName, 1);
+      request.onupgradeneeded = () => {
+        const database = request.result;
+        if (!database.objectStoreNames.contains(proofStoreName)) {
+          database.createObjectStore(proofStoreName, { keyPath: "expenseId" });
+        }
+      };
+      request.onsuccess = () => {
+        const database = request.result;
+        database.onversionchange = () => {
+          database.close();
+          proofDatabasePromise = null;
+        };
+        resolve(database);
+      };
+      request.onerror = () => {
+        proofDatabasePromise = null;
+        reject(request.error ?? new Error("Could not open screenshot storage."));
+      };
+      request.onblocked = () => {
+        proofDatabasePromise = null;
+        reject(new Error("Close other Daybook tabs to enable screenshot storage."));
+      };
+    });
+  }
+  return proofDatabasePromise;
+}
+
+async function getPaymentProof(expenseId) {
+  const database = await openProofDatabase();
+  return new Promise((resolve, reject) => {
+    const transaction = database.transaction(proofStoreName, "readonly");
+    const request = transaction.objectStore(proofStoreName).get(expenseId);
+    request.onsuccess = () => resolve(request.result ?? null);
+    request.onerror = () => reject(request.error ?? new Error("Could not read payment screenshot."));
+  });
+}
+
+async function savePaymentProof(expenseId, file) {
+  const database = await openProofDatabase();
+  return new Promise((resolve, reject) => {
+    const transaction = database.transaction(proofStoreName, "readwrite");
+    transaction.objectStore(proofStoreName).put({
+      expenseId,
+      image: file,
+      fileName: file.name,
+      savedAt: new Date().toISOString()
+    });
+    transaction.oncomplete = resolve;
+    transaction.onerror = () => reject(transaction.error ?? new Error("Could not save payment screenshot."));
+    transaction.onabort = () => reject(transaction.error ?? new Error("Could not save payment screenshot."));
+  });
+}
+
+async function removePaymentProof(expenseId) {
+  const database = await openProofDatabase();
+  return new Promise((resolve, reject) => {
+    const transaction = database.transaction(proofStoreName, "readwrite");
+    transaction.objectStore(proofStoreName).delete(expenseId);
+    transaction.oncomplete = resolve;
+    transaction.onerror = () => reject(transaction.error ?? new Error("Could not remove payment screenshot."));
+    transaction.onabort = () => reject(transaction.error ?? new Error("Could not remove payment screenshot."));
+  });
+}
+
+async function refreshDashboard() {
   const month = monthFilter.value;
   if (!month) return;
+  const loadId = ++dashboardLoadId;
   document.querySelector("#category-period").textContent = month === localDateString().slice(0, 7)
     ? "THIS MONTH"
     : monthLabel(month, { month: "short", year: "numeric" }).toUpperCase();
@@ -90,24 +170,34 @@ function refreshDashboard() {
     month === localDateString().slice(0, 7) ? "this month" : monthLabel(month);
   try {
     const allExpenses = readExpenses();
-    currentExpenses = allExpenses
+    const expenses = allExpenses
       .filter((expense) => expense.date.slice(0, 7) === month)
       .sort((a, b) => b.date.localeCompare(a.date) || b.id.localeCompare(a.id));
     const categoryTotals = new Map();
-    currentExpenses.forEach((expense) => {
+    expenses.forEach((expense) => {
       categoryTotals.set(expense.category, (categoryTotals.get(expense.category) ?? 0) + expense.amount_cents);
     });
     const categories = [...categoryTotals]
       .map(([category, total_cents]) => ({ category, total_cents }))
       .sort((a, b) => b.total_cents - a.total_cents || a.category.localeCompare(b.category));
     const summary = {
-      count: currentExpenses.length,
-      total_cents: currentExpenses.reduce((total, expense) => total + expense.amount_cents, 0),
+      count: expenses.length,
+      total_cents: expenses.reduce((total, expense) => total + expense.amount_cents, 0),
       categories
     };
+    const proofs = await Promise.all(expenses.map(async (expense) => {
+      try {
+        return await getPaymentProof(expense.id);
+      } catch (error) {
+        return { error };
+      }
+    }));
+    if (loadId !== dashboardLoadId) return;
     renderSummary(summary);
     renderCategories(summary.categories, summary.total_cents);
-    renderExpenses(currentExpenses);
+    renderExpenses(expenses, proofs);
+    const proofError = proofs.find((proof) => proof?.error)?.error;
+    if (proofError) setFormMessage(proofError.message);
   } catch (error) {
     setFormMessage(error instanceof SyntaxError
       ? "Saved expenses are unreadable. Your browser data was not changed."
@@ -164,13 +254,13 @@ function renderCategories(categoryTotals, totalCents) {
   });
 }
 
-function renderExpenses(expenses) {
+function renderExpenses(expenses, proofs) {
   const rows = document.querySelector("#expense-rows");
   const emptyState = document.querySelector("#empty-state");
   rows.replaceChildren();
   emptyState.hidden = expenses.length > 0;
 
-  expenses.forEach((expense) => {
+  expenses.forEach((expense, index) => {
     const row = document.createElement("tr");
     const descriptionCell = document.createElement("td");
     const description = document.createElement("span");
@@ -192,6 +282,57 @@ function renderExpenses(expenses) {
     amountCell.className = "expense-amount";
     amountCell.textContent = formatMoney(expense.amount_cents);
 
+    const proofCell = document.createElement("td");
+    proofCell.className = "proof-cell";
+    const proof = proofs[index];
+    if (proof?.error) {
+      const unavailable = document.createElement("span");
+      unavailable.className = "proof-status proof-unavailable";
+      unavailable.textContent = "Unavailable";
+      proofCell.append(unavailable);
+    } else {
+      const proofActions = document.createElement("div");
+      proofActions.className = "proof-actions";
+      const fileInput = document.createElement("input");
+      fileInput.className = "sr-only";
+      fileInput.type = "file";
+      fileInput.accept = allowedProofTypes.join(",");
+      fileInput.tabIndex = -1;
+      fileInput.setAttribute("aria-label", `Choose a payment screenshot for ${expense.description}`);
+      const uploadButton = document.createElement("button");
+      uploadButton.className = "proof-button";
+      uploadButton.type = "button";
+      uploadButton.textContent = proof ? "Replace" : "Add screenshot";
+      uploadButton.setAttribute("aria-label", `${proof ? "Replace" : "Add"} payment screenshot for ${expense.description}`);
+      uploadButton.addEventListener("click", () => fileInput.click());
+      fileInput.addEventListener("change", () => {
+        const [file] = fileInput.files;
+        if (file) uploadPaymentProof(expense, file, proofCell);
+        fileInput.value = "";
+      });
+      proofActions.append(uploadButton, fileInput);
+
+      if (proof) {
+        const viewButton = document.createElement("button");
+        viewButton.className = "proof-button proof-view-button";
+        viewButton.type = "button";
+        viewButton.textContent = "View";
+        viewButton.setAttribute("aria-label", `View payment screenshot for ${expense.description}`);
+        viewButton.addEventListener("click", () => showPaymentProof(expense, proof));
+        const removeButton = document.createElement("button");
+        removeButton.className = "proof-remove-button";
+        removeButton.type = "button";
+        removeButton.textContent = "Remove";
+        removeButton.setAttribute("aria-label", `Remove payment screenshot for ${expense.description}`);
+        removeButton.addEventListener("click", () => deletePaymentProof(expense, proofCell));
+        proofActions.append(viewButton, removeButton);
+      }
+      const proofStatus = document.createElement("span");
+      proofStatus.className = "proof-status";
+      proofStatus.textContent = proof ? "Saved in this browser" : "Optional";
+      proofCell.append(proofActions, proofStatus);
+    }
+
     const actionCell = document.createElement("td");
     const deleteButton = document.createElement("button");
     deleteButton.className = "delete-button";
@@ -202,17 +343,76 @@ function renderExpenses(expenses) {
     deleteButton.addEventListener("click", () => deleteExpense(expense));
     actionCell.append(deleteButton);
 
-    row.append(descriptionCell, categoryCell, dateCell, amountCell, actionCell);
+    row.append(descriptionCell, categoryCell, dateCell, amountCell, proofCell, actionCell);
     rows.append(row);
   });
 }
 
-function deleteExpense(expense) {
+async function uploadPaymentProof(expense, file, proofCell) {
+  if (!allowedProofTypes.includes(file.type)) {
+    setFormMessage("Upload a JPG, PNG, or WebP screenshot.");
+    return;
+  }
+  if (file.size === 0 || file.size > maxProofSize) {
+    setFormMessage("Screenshot must be smaller than 5 MB.");
+    return;
+  }
+  const uploadButton = proofCell.querySelector(".proof-button");
+  if (uploadButton) uploadButton.disabled = true;
+  setFormMessage("");
+  try {
+    await savePaymentProof(expense.id, file);
+    setFormMessage("Payment screenshot saved in this browser.", true);
+    await refreshDashboard();
+  } catch (error) {
+    setFormMessage(error.name === "QuotaExceededError"
+      ? "Browser storage is full. Remove another screenshot or use a smaller image."
+      : error.message);
+    if (uploadButton) uploadButton.disabled = false;
+  }
+}
+
+function showPaymentProof(expense, proof) {
+  if (proofPreviewUrl) URL.revokeObjectURL(proofPreviewUrl);
+  proofPreviewUrl = URL.createObjectURL(proof.image);
+  proofPreview.src = proofPreviewUrl;
+  proofPreview.alt = `Payment screenshot for ${expense.description}`;
+  document.querySelector("#proof-dialog-caption").textContent =
+    `${expense.description} · ${formatMoney(expense.amount_cents)} · ${formatDate(expense.date)}`;
+  proofDialog.showModal();
+}
+
+document.querySelector("#proof-dialog-close").addEventListener("click", () => proofDialog.close());
+proofDialog.addEventListener("close", () => {
+  proofPreview.removeAttribute("src");
+  if (proofPreviewUrl) URL.revokeObjectURL(proofPreviewUrl);
+  proofPreviewUrl = null;
+});
+proofDialog.addEventListener("click", (event) => {
+  if (event.target === proofDialog) proofDialog.close();
+});
+
+async function deletePaymentProof(expense, proofCell) {
+  const confirmed = window.confirm(`Remove the payment screenshot for "${expense.description}"?`);
+  if (!confirmed) return;
+  try {
+    await removePaymentProof(expense.id);
+    setFormMessage("Payment screenshot removed.", true);
+    await refreshDashboard();
+  } catch (error) {
+    setFormMessage(error.message);
+    const removeButton = proofCell.querySelector(".proof-remove-button");
+    if (removeButton) removeButton.disabled = false;
+  }
+}
+
+async function deleteExpense(expense) {
   if (!window.confirm(`Delete "${expense.description}"?`)) return;
   try {
     const expenses = readExpenses().filter((item) => item.id !== expense.id);
+    await removePaymentProof(expense.id);
     saveExpenses(expenses);
-    refreshDashboard();
+    await refreshDashboard();
   } catch (error) {
     setFormMessage(error.message);
   }

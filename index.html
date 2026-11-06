@@ -176,7 +176,7 @@
           <div class="table-wrap">
             <table>
               <thead>
-                <tr><th scope="col">DESCRIPTION</th><th scope="col">CATEGORY</th><th scope="col">DATE</th><th scope="col" class="amount-column">AMOUNT</th><th scope="col"><span class="sr-only">Actions</span></th></tr>
+                <tr><th scope="col">DESCRIPTION</th><th scope="col">CATEGORY</th><th scope="col">DATE</th><th scope="col" class="amount-column">AMOUNT</th><th scope="col">PAYMENT PROOF</th><th scope="col"><span class="sr-only">Actions</span></th></tr>
               </thead>
               <tbody id="expense-rows"></tbody>
             </table>
@@ -187,6 +187,17 @@
             </div>
           </div>
         </section>
+        <dialog class="proof-dialog" id="proof-dialog" aria-labelledby="proof-dialog-title">
+          <div class="proof-dialog-header">
+            <div>
+              <h2 id="proof-dialog-title">Payment screenshot</h2>
+              <p id="proof-dialog-caption"></p>
+            </div>
+            <button class="proof-close-button" id="proof-dialog-close" type="button" aria-label="Close screenshot">×</button>
+          </div>
+          <img class="proof-preview" id="proof-preview" alt="">
+          <p class="proof-privacy-note">Stored only in this browser. It is not uploaded to Daybook.</p>
+        </dialog>
         <footer class="page-footer">Made for a little more peace of mind <span aria-hidden="true">·</span> Your finances are yours</footer>
       </main>
     </div>
